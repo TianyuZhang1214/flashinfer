@@ -1568,13 +1568,11 @@ __global__ void TopPRenormProbKernel(DType* probs, DType* renormed_prob, float* 
   temp_storage.max_val = 0;
   vec_t<float, VEC_SIZE> probs_vec;
 
-  printf(p);
   // === Fast-path when p == 1.0 (or very close) ===
    const float EPS_P = 1e-7f;
    if (p >= 1.0f - EPS_P) {
      // shared scalar to broadcast row sum
      __shared__ double s_row_sum;
-	printf("Enter fast path\n");
      // Stage A: per-thread double accumulation over assigned lanes (vectorized)
      double thread_sum = 0.0;
      const uint32_t num_iters = ceil_div(d, BLOCK_THREADS * VEC_SIZE);
