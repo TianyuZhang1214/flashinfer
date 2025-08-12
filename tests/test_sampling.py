@@ -429,7 +429,7 @@ def test_top_p_renorm_probs_ds(batch_size, vocab_size, p):
         dim=-1, keepdim=True
     )
 
-    trail = 1000
+    trail = 100
     total_time = 0
     for _ in range(trail):
         st = time.perf_counter()

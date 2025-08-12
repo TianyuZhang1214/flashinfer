@@ -1621,122 +1621,122 @@ __global__ void TopPRenormProbFastPathKernel(DType* probs, DType* renormed_prob,
   }
 }
 
-// template <uint32_t BLOCK_THREADS, BlockReduceAlgorithm REDUCE_ALGORITHM, uint32_t VEC_SIZE,
-//           typename DType>
-// __global__ void TopPRenormProbKernel(DType* probs, DType* renormed_prob, float* top_p_arr,
-//                                      float top_p_val, uint32_t d) {
-//   const uint32_t bx = blockIdx.x, tx = threadIdx.x;
-//   const uint32_t row_idx = bx;
-//   float p = top_p_arr == nullptr ? top_p_val : top_p_arr[bx];
-//
-//   extern __shared__ __align__(alignof(RenormTempStorage<BLOCK_THREADS, REDUCE_ALGO>))
-//       uint8_t smem_renorm[];
-//   auto& temp_storage =
-//       reinterpret_cast<RenormTempStorage<BLOCK_THREADS, REDUCE_ALGO>&>(smem_renorm);
-//   temp_storage.max_val = 0;
-//   vec_t<float, VEC_SIZE> probs_vec;
-//
-//   float max_val = GetMaxValue<VEC_SIZE, BLOCK_THREADS, REDUCE_ALGORITHM,
-//                               RenormTempStorage<BLOCK_THREADS, REDUCE_ALGORITHM>>(probs, row_idx, d,
-//                                                                                   temp_storage);
-//
-//   double low = 0, high = max_val;
-//   float min_gt_low, max_le_high;
-//   float sum_low = 1;
-//   // f(x) = sum(probs[probs > x]), f(x) is non-increasing
-//   // min_gt_low = min{p \in probs | p > low}, max_le_high = max{p \in probs | p <= high}
-//   // loop invariant:
-//   // - f(low) >= p, f(high) < p
-//   // - f(low) > f(min_gt_low) >= f(max_le_high) == f(high)
-//   // stopping condition
-//   // - f(low) >= p, f(min_gt_low) == f(max_le_high) == f(high) < p
-//   do {
-//     double pivot_0 = (high + 2 * low) / 3;
-//     double pivot_1 = (2 * high + low) / 3;
-//
-//     float aggregate_gt_pivot_0 = 0, aggregate_gt_pivot_1 = 0;
-//     min_gt_low = high;
-//     max_le_high = low;
-// #pragma unroll 2
-//     for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i) {
-//       probs_vec.fill(0);
-//       if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d) {
-//         probs_vec.cast_load(probs + row_idx * d + i * BLOCK_THREADS * VEC_SIZE + tx * VEC_SIZE);
-//       }
-//
-//       float probs_gt_pivot_0[VEC_SIZE], probs_gt_pivot_1[VEC_SIZE];
-// #pragma unroll
-//       for (uint32_t j = 0; j < VEC_SIZE; ++j) {
-//         probs_gt_pivot_0[j] = (probs_vec[j] > pivot_0) ? probs_vec[j] : 0;
-//         probs_gt_pivot_1[j] = (probs_vec[j] > pivot_1) ? probs_vec[j] : 0;
-//
-//         if (probs_vec[j] > low && (i * BLOCK_THREADS + tx) * VEC_SIZE + j < d) {
-//           min_gt_low = min(min_gt_low, probs_vec[j]);
-//         }
-//         if (probs_vec[j] <= high && (i * BLOCK_THREADS + tx) * VEC_SIZE + j < d) {
-//           max_le_high = max(max_le_high, probs_vec[j]);
-//         }
-//       }
-//
-//       aggregate_gt_pivot_0 +=
-//           BlockReduce<float, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
-//               .Sum<VEC_SIZE>(probs_gt_pivot_0);
-//       __syncthreads();
-//
-//       aggregate_gt_pivot_1 +=
-//           BlockReduce<float, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
-//               .Sum<VEC_SIZE>(probs_gt_pivot_1);
-//       __syncthreads();
-//     }
-//     min_gt_low = BlockReduce<float, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
-//                      .Reduce(min_gt_low, cub::Min());
-//     __syncthreads();
-//     max_le_high =
-//         BlockReduce<float, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
-//             .Reduce(max_le_high, cub::Max());
-//     if (tx == 0) {
-//       temp_storage.block_aggregate.values[0] = aggregate_gt_pivot_0;
-//       temp_storage.block_aggregate.values[1] = aggregate_gt_pivot_1;
-//       temp_storage.min_val = min_gt_low;
-//       temp_storage.max_val = max_le_high;
-//     }
-//     __syncthreads();
-//     aggregate_gt_pivot_0 = temp_storage.block_aggregate.values[0];
-//     aggregate_gt_pivot_1 = temp_storage.block_aggregate.values[1];
-//     min_gt_low = temp_storage.min_val;
-//     max_le_high = temp_storage.max_val;
-//
-//     if (aggregate_gt_pivot_1 >= p) {
-//       low = pivot_1;
-//       sum_low = aggregate_gt_pivot_1;
-//     } else if (aggregate_gt_pivot_0 >= p) {
-//       low = pivot_0;
-//       high = min(pivot_1, max_le_high);
-//       sum_low = aggregate_gt_pivot_0;
-//     } else {
-//       high = min(pivot_0, max_le_high);
-//     }
-//   } while (min_gt_low != max_le_high);
-//
-//   float normalizer = math::ptx_rcp(max(sum_low, 1e-8));
-//
-//   // normalize
-// #pragma unroll 2
-//   for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i) {
-//     probs_vec.fill(0);
-//     if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d) {
-//       probs_vec.cast_load(probs + row_idx * d + i * BLOCK_THREADS * VEC_SIZE + tx * VEC_SIZE);
-//     }
-// #pragma unroll
-//     for (uint32_t j = 0; j < VEC_SIZE; ++j) {
-//       probs_vec[j] = (probs_vec[j] > low) ? probs_vec[j] * normalizer : 0;
-//     }
-//     if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d) {
-//       probs_vec.cast_store(renormed_prob + row_idx * d + i * BLOCK_THREADS * VEC_SIZE +
-//                            tx * VEC_SIZE);
-//     }
-//   }
-// }
+ template <uint32_t BLOCK_THREADS, BlockReduceAlgorithm REDUCE_ALGORITHM, uint32_t VEC_SIZE,
+           typename DType>
+ __global__ void TopPRenormProbKernel(DType* probs, DType* renormed_prob, float* top_p_arr,
+                                      float top_p_val, uint32_t d) {
+   const uint32_t bx = blockIdx.x, tx = threadIdx.x;
+   const uint32_t row_idx = bx;
+   float p = top_p_arr == nullptr ? top_p_val : top_p_arr[bx];
+
+   extern __shared__ __align__(alignof(RenormTempStorage<BLOCK_THREADS, REDUCE_ALGO>))
+       uint8_t smem_renorm[];
+   auto& temp_storage =
+       reinterpret_cast<RenormTempStorage<BLOCK_THREADS, REDUCE_ALGO>&>(smem_renorm);
+   temp_storage.max_val = 0;
+   vec_t<float, VEC_SIZE> probs_vec;
+
+   float max_val = GetMaxValue<VEC_SIZE, BLOCK_THREADS, REDUCE_ALGORITHM,
+                               RenormTempStorage<BLOCK_THREADS, REDUCE_ALGORITHM>>(probs, row_idx, d,
+                                                                                   temp_storage);
+
+   double low = 0, high = max_val;
+   float min_gt_low, max_le_high;
+   float sum_low = 1;
+   // f(x) = sum(probs[probs > x]), f(x) is non-increasing
+   // min_gt_low = min{p \in probs | p > low}, max_le_high = max{p \in probs | p <= high}
+   // loop invariant:
+   // - f(low) >= p, f(high) < p
+   // - f(low) > f(min_gt_low) >= f(max_le_high) == f(high)
+   // stopping condition
+   // - f(low) >= p, f(min_gt_low) == f(max_le_high) == f(high) < p
+   do {
+     double pivot_0 = (high + 2 * low) / 3;
+     double pivot_1 = (2 * high + low) / 3;
+
+     float aggregate_gt_pivot_0 = 0, aggregate_gt_pivot_1 = 0;
+     min_gt_low = high;
+     max_le_high = low;
+ #pragma unroll 2
+     for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i) {
+       probs_vec.fill(0);
+       if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d) {
+         probs_vec.cast_load(probs + row_idx * d + i * BLOCK_THREADS * VEC_SIZE + tx * VEC_SIZE);
+       }
+
+       float probs_gt_pivot_0[VEC_SIZE], probs_gt_pivot_1[VEC_SIZE];
+ #pragma unroll
+       for (uint32_t j = 0; j < VEC_SIZE; ++j) {
+         probs_gt_pivot_0[j] = (probs_vec[j] > pivot_0) ? probs_vec[j] : 0;
+         probs_gt_pivot_1[j] = (probs_vec[j] > pivot_1) ? probs_vec[j] : 0;
+
+         if (probs_vec[j] > low && (i * BLOCK_THREADS + tx) * VEC_SIZE + j < d) {
+           min_gt_low = min(min_gt_low, probs_vec[j]);
+         }
+         if (probs_vec[j] <= high && (i * BLOCK_THREADS + tx) * VEC_SIZE + j < d) {
+           max_le_high = max(max_le_high, probs_vec[j]);
+         }
+       }
+
+       aggregate_gt_pivot_0 +=
+           BlockReduce<float, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
+               .Sum<VEC_SIZE>(probs_gt_pivot_0);
+       __syncthreads();
+
+       aggregate_gt_pivot_1 +=
+           BlockReduce<float, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
+               .Sum<VEC_SIZE>(probs_gt_pivot_1);
+       __syncthreads();
+     }
+     min_gt_low = BlockReduce<float, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
+                      .Reduce(min_gt_low, cub::Min());
+     __syncthreads();
+     max_le_high =
+         BlockReduce<float, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce)
+             .Reduce(max_le_high, cub::Max());
+     if (tx == 0) {
+       temp_storage.block_aggregate.values[0] = aggregate_gt_pivot_0;
+       temp_storage.block_aggregate.values[1] = aggregate_gt_pivot_1;
+       temp_storage.min_val = min_gt_low;
+       temp_storage.max_val = max_le_high;
+     }
+     __syncthreads();
+     aggregate_gt_pivot_0 = temp_storage.block_aggregate.values[0];
+     aggregate_gt_pivot_1 = temp_storage.block_aggregate.values[1];
+     min_gt_low = temp_storage.min_val;
+     max_le_high = temp_storage.max_val;
+
+     if (aggregate_gt_pivot_1 >= p) {
+       low = pivot_1;
+       sum_low = aggregate_gt_pivot_1;
+     } else if (aggregate_gt_pivot_0 >= p) {
+       low = pivot_0;
+       high = min(pivot_1, max_le_high);
+       sum_low = aggregate_gt_pivot_0;
+     } else {
+       high = min(pivot_0, max_le_high);
+     }
+   } while (min_gt_low != max_le_high);
+
+   float normalizer = math::ptx_rcp(max(sum_low, 1e-8));
+
+   // normalize
+ #pragma unroll 2
+   for (uint32_t i = 0; i < ceil_div(d, BLOCK_THREADS * VEC_SIZE); ++i) {
+     probs_vec.fill(0);
+     if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d) {
+       probs_vec.cast_load(probs + row_idx * d + i * BLOCK_THREADS * VEC_SIZE + tx * VEC_SIZE);
+     }
+ #pragma unroll
+     for (uint32_t j = 0; j < VEC_SIZE; ++j) {
+       probs_vec[j] = (probs_vec[j] > low) ? probs_vec[j] * normalizer : 0;
+     }
+     if ((i * BLOCK_THREADS + tx) * VEC_SIZE < d) {
+       probs_vec.cast_store(renormed_prob + row_idx * d + i * BLOCK_THREADS * VEC_SIZE +
+                            tx * VEC_SIZE);
+     }
+   }
+ }
 
 template <uint32_t BLOCK_THREADS, BlockReduceAlgorithm REDUCE_ALGORITHM, uint32_t VEC_SIZE,
           typename DType, typename IdType>
@@ -1993,8 +1993,8 @@ cudaError_t TopPRenormProb(DType* probs, DType* renormed_prob, float* top_p_arr,
   dim3 nthrs(BLOCK_THREADS);
   void* args[] = {&probs, &renormed_prob, &top_p_arr, &top_p_val, &d};
   DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
-    // auto kernel = TopPRenormProbKernel<BLOCK_THREADS, REDUCE_ALGO, VEC_SIZE, DType>;
-    auto kernel = TopPRenormProbFastPathKernel<BLOCK_THREADS, REDUCE_ALGO, VEC_SIZE, DType>;
+    auto kernel = TopPRenormProbKernel<BLOCK_THREADS, REDUCE_ALGO, VEC_SIZE, DType>;
+    // auto kernel = TopPRenormProbFastPathKernel<BLOCK_THREADS, REDUCE_ALGO, VEC_SIZE, DType>;
     FLASHINFER_CUDA_CALL(
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
     FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
