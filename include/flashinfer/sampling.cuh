@@ -1569,57 +1569,57 @@ __global__ void TopPRenormProbKernel(DType* probs, DType* renormed_prob, float* 
   vec_t<float, VEC_SIZE> probs_vec;
 
   // === Fast-path when p == 1.0 (or very close) ===
-//   const float EPS_P = 1e-7f;
-//   if (p >= 1.0f - EPS_P) {
-//     // shared scalar to broadcast row sum
-//     __shared__ double s_row_sum;
-//
-//     // Stage A: per-thread double accumulation over assigned lanes (vectorized)
-//     double thread_sum = 0.0;
-//     const uint32_t num_iters = ceil_div(d, BLOCK_THREADS * VEC_SIZE);
-//     for (uint32_t i = 0; i < num_iters; ++i) {
-//       probs_vec.fill(0.0f);
-//       const uint32_t base_idx = (i * BLOCK_THREADS + tx) * VEC_SIZE;
-//       if (base_idx < d) {
-//         probs_vec.cast_load(probs + row_idx * d + base_idx);
-//       }
-// #pragma unroll
-//     for (uint32_t j = 0; j < VEC_SIZE; ++j) {
-//         const uint32_t idx = base_idx + j;
-//         if (idx < d) thread_sum += static_cast<double>(probs_vec[j]);
-//       }
-//     }
-//
-//     // Block reduce (double). Assumes BlockReduce supports double.
-//     double row_sum = BlockReduce<double, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce).Sum(thread_sum);
-//     // broadcast via shared
-//     if (tx == 0) s_row_sum = row_sum;
-//     __syncthreads();
-//     row_sum = s_row_sum;
-//
-//     // guard against zero sum
-//     const double denom = (row_sum <= 1e-12) ? 1.0 : row_sum;
-//     const float normalizer = static_cast<float>(math::ptx_rcp(static_cast<float>(denom)));
-//
-//     // Stage B: normalize and store
-//     for (uint32_t i = 0; i < num_iters; ++i) {
-//       probs_vec.fill(0.0f);
-//       const uint32_t base_idx = (i * BLOCK_THREADS + tx) * VEC_SIZE;
-//       if (base_idx < d) {
-//         probs_vec.cast_load(probs + row_idx * d + base_idx);
-//       }
-// #pragma unroll
-//     for (uint32_t j = 0; j < VEC_SIZE; ++j) {
-//         const uint32_t idx = base_idx + j;
-//         float v = probs_vec[j];
-//         probs_vec[j] = (idx < d) ? (v * normalizer) : 0.0f;
-//       }
-//       if (base_idx < d) {
-//         probs_vec.cast_store(renormed_prob + row_idx * d + base_idx);
-//       }
-//     }
-//     return; // done fast-path
-//   }
+   const float EPS_P = 1e-7f;
+   if (p >= 1.0f - EPS_P) {
+     // shared scalar to broadcast row sum
+     __shared__ double s_row_sum;
+	printf("Enter fast path\n");
+     // Stage A: per-thread double accumulation over assigned lanes (vectorized)
+     double thread_sum = 0.0;
+     const uint32_t num_iters = ceil_div(d, BLOCK_THREADS * VEC_SIZE);
+     for (uint32_t i = 0; i < num_iters; ++i) {
+       probs_vec.fill(0.0f);
+       const uint32_t base_idx = (i * BLOCK_THREADS + tx) * VEC_SIZE;
+       if (base_idx < d) {
+         probs_vec.cast_load(probs + row_idx * d + base_idx);
+       }
+ #pragma unroll
+     for (uint32_t j = 0; j < VEC_SIZE; ++j) {
+         const uint32_t idx = base_idx + j;
+         if (idx < d) thread_sum += static_cast<double>(probs_vec[j]);
+       }
+     }
+
+     // Block reduce (double). Assumes BlockReduce supports double.
+     double row_sum = BlockReduce<double, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce).Sum(thread_sum);
+     // broadcast via shared
+     if (tx == 0) s_row_sum = row_sum;
+     __syncthreads();
+     row_sum = s_row_sum;
+
+     // guard against zero sum
+     const double denom = (row_sum <= 1e-12) ? 1.0 : row_sum;
+     const float normalizer = static_cast<float>(math::ptx_rcp(static_cast<float>(denom)));
+
+     // Stage B: normalize and store
+     for (uint32_t i = 0; i < num_iters; ++i) {
+       probs_vec.fill(0.0f);
+       const uint32_t base_idx = (i * BLOCK_THREADS + tx) * VEC_SIZE;
+       if (base_idx < d) {
+         probs_vec.cast_load(probs + row_idx * d + base_idx);
+       }
+ #pragma unroll
+     for (uint32_t j = 0; j < VEC_SIZE; ++j) {
+         const uint32_t idx = base_idx + j;
+         float v = probs_vec[j];
+         probs_vec[j] = (idx < d) ? (v * normalizer) : 0.0f;
+       }
+       if (base_idx < d) {
+         probs_vec.cast_store(renormed_prob + row_idx * d + base_idx);
+       }
+     }
+     return; // done fast-path
+   }
 
   // === General case: original pivot-search + renorm (unchanged) ===
   float max_val = GetMaxValue<VEC_SIZE, BLOCK_THREADS, REDUCE_ALGORITHM,
