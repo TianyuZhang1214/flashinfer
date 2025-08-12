@@ -1553,6 +1553,74 @@ struct RenormTempStorage {
   };
 };
 
+// TopP fast-path: for p == 1.0 (or p >= 1 - eps)
+// One kernel: per-row double-precision reduce to compute sum, then per-row normalize and write renormed_prob.
+// Keeps the same memory layout and vec_t load/store pattern as original kernels.
+template <uint32_t BLOCK_THREADS, BlockReduceAlgorithm REDUCE_ALGORITHM, uint32_t VEC_SIZE,
+          typename DType>
+__global__ void TopPRenormProbFastPathKernel(DType* probs, DType* renormed_prob, float* top_p_arr,
+                                             float top_p_val, uint32_t d) {
+  const uint32_t bx = blockIdx.x, tx = threadIdx.x;
+  const uint32_t row_idx = bx;
+  float p = top_p_arr == nullptr ? top_p_val : top_p_arr[bx];
+
+  extern __shared__ __align__(alignof(RenormTempStorage<BLOCK_THREADS, REDUCE_ALGORITHM>))
+      uint8_t smem_renorm[];
+  auto& temp_storage =
+      reinterpret_cast<RenormTempStorage<BLOCK_THREADS, REDUCE_ALGORITHM>&>(smem_renorm);
+
+  vec_t<float, VEC_SIZE> probs_vec;
+
+  // Shared scalar to broadcast row sum
+  __shared__ float s_row_sum;
+
+  // Stage A: per-thread float accumulation over assigned lanes (vectorized)
+  float thread_sum = 0.0f;
+  const uint32_t num_iters = ceil_div(d, BLOCK_THREADS * VEC_SIZE);
+  for (uint32_t i = 0; i < num_iters; ++i) {
+    probs_vec.fill(0.0f);
+    const uint32_t base_idx = (i * BLOCK_THREADS + tx) * VEC_SIZE;
+    if (base_idx < d) {
+      probs_vec.cast_load(probs + row_idx * d + base_idx);
+    }
+    #pragma unroll
+    for (uint32_t j = 0; j < VEC_SIZE; ++j) {
+      const uint32_t idx = base_idx + j;
+      if (idx < d) thread_sum += probs_vec[j];
+    }
+  }
+
+  // Block reduce (float)
+  float row_sum = BlockReduce<float, BLOCK_THREADS, REDUCE_ALGORITHM>(
+                      temp_storage.block_prim.reduce).Sum(thread_sum);
+  // Broadcast via shared
+  if (tx == 0) s_row_sum = row_sum;
+  __syncthreads();
+  row_sum = s_row_sum;
+
+  // Guard against zero sum
+  const float denom = (row_sum <= 1e-8f) ? 1.0f : row_sum;
+  const float normalizer = math::ptx_rcp(denom);
+
+  // Stage B: normalize and store
+  for (uint32_t i = 0; i < num_iters; ++i) {
+    probs_vec.fill(0.0f);
+    const uint32_t base_idx = (i * BLOCK_THREADS + tx) * VEC_SIZE;
+    if (base_idx < d) {
+      probs_vec.cast_load(probs + row_idx * d + base_idx);
+    }
+    #pragma unroll
+    for (uint32_t j = 0; j < VEC_SIZE; ++j) {
+      const uint32_t idx = base_idx + j;
+      float v = probs_vec[j];
+      probs_vec[j] = (idx < d) ? (v * normalizer) : 0.0f;
+    }
+    if (base_idx < d) {
+      probs_vec.cast_store(renormed_prob + row_idx * d + base_idx);
+    }
+  }
+}
+
 template <uint32_t BLOCK_THREADS, BlockReduceAlgorithm REDUCE_ALGORITHM, uint32_t VEC_SIZE,
           typename DType>
 __global__ void TopPRenormProbKernel(DType* probs, DType* renormed_prob, float* top_p_arr,
@@ -1568,59 +1636,6 @@ __global__ void TopPRenormProbKernel(DType* probs, DType* renormed_prob, float* 
   temp_storage.max_val = 0;
   vec_t<float, VEC_SIZE> probs_vec;
 
-  // === Fast-path when p == 1.0 (or very close) ===
-   const float EPS_P = 1e-7f;
-   if (p >= 1.0f - EPS_P) {
-     // shared scalar to broadcast row sum
-     __shared__ double s_row_sum;
-     // Stage A: per-thread double accumulation over assigned lanes (vectorized)
-     double thread_sum = 0.0;
-     const uint32_t num_iters = ceil_div(d, BLOCK_THREADS * VEC_SIZE);
-     for (uint32_t i = 0; i < num_iters; ++i) {
-       probs_vec.fill(0.0f);
-       const uint32_t base_idx = (i * BLOCK_THREADS + tx) * VEC_SIZE;
-       if (base_idx < d) {
-         probs_vec.cast_load(probs + row_idx * d + base_idx);
-       }
-#pragma unroll
-     for (uint32_t j = 0; j < VEC_SIZE; ++j) {
-         const uint32_t idx = base_idx + j;
-         if (idx < d) thread_sum += static_cast<double>(probs_vec[j]);
-       }
-     }
-
-     // Block reduce (double). Assumes BlockReduce supports double.
-     double row_sum = BlockReduce<double, BLOCK_THREADS, REDUCE_ALGORITHM>(temp_storage.block_prim.reduce).Sum(thread_sum);
-     // broadcast via shared
-     if (tx == 0) s_row_sum = row_sum;
-     __syncthreads();
-     row_sum = s_row_sum;
-
-     // guard against zero sum
-     const double denom = (row_sum <= 1e-12) ? 1.0 : row_sum;
-     const float normalizer = static_cast<float>(math::ptx_rcp(static_cast<float>(denom)));
-
-     // Stage B: normalize and store
-     for (uint32_t i = 0; i < num_iters; ++i) {
-       probs_vec.fill(0.0f);
-       const uint32_t base_idx = (i * BLOCK_THREADS + tx) * VEC_SIZE;
-       if (base_idx < d) {
-         probs_vec.cast_load(probs + row_idx * d + base_idx);
-       }
-#pragma unroll
-     for (uint32_t j = 0; j < VEC_SIZE; ++j) {
-         const uint32_t idx = base_idx + j;
-         float v = probs_vec[j];
-         probs_vec[j] = (idx < d) ? (v * normalizer) : 0.0f;
-       }
-       if (base_idx < d) {
-         probs_vec.cast_store(renormed_prob + row_idx * d + base_idx);
-       }
-     }
-     return; // done fast-path
-   }
-
-  // === General case: original pivot-search + renorm (unchanged) ===
   float max_val = GetMaxValue<VEC_SIZE, BLOCK_THREADS, REDUCE_ALGORITHM,
                               RenormTempStorage<BLOCK_THREADS, REDUCE_ALGORITHM>>(probs, row_idx, d,
                                                                                   temp_storage);
@@ -1978,7 +1993,8 @@ cudaError_t TopPRenormProb(DType* probs, DType* renormed_prob, float* top_p_arr,
   dim3 nthrs(BLOCK_THREADS);
   void* args[] = {&probs, &renormed_prob, &top_p_arr, &top_p_val, &d};
   DISPATCH_ALIGNED_VEC_SIZE(vec_size, VEC_SIZE, {
-    auto kernel = TopPRenormProbKernel<BLOCK_THREADS, REDUCE_ALGO, VEC_SIZE, DType>;
+    // auto kernel = TopPRenormProbKernel<BLOCK_THREADS, REDUCE_ALGO, VEC_SIZE, DType>;
+    auto kernel = TopPRenormProbFastPathKernel<BLOCK_THREADS, REDUCE_ALGO, VEC_SIZE, DType>;
     FLASHINFER_CUDA_CALL(
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
     FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, nblks, nthrs, args, smem_size, stream));
