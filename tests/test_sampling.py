@@ -435,6 +435,7 @@ def test_top_p_renorm_probs_ds(batch_size, vocab_size, p):
         st = time.perf_counter()
         renorm_prob = flashinfer.sampling.top_p_renorm_probs(normalized_prob, p)
         total_time += time.perf_counter() - st
+    print(f"total_time: {total_time}")
 
     torch.testing.assert_close(
         renorm_prob_ground_truth,
