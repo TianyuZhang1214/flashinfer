@@ -1568,6 +1568,7 @@ __global__ void TopPRenormProbKernel(DType* probs, DType* renormed_prob, float* 
   temp_storage.max_val = 0;
   vec_t<float, VEC_SIZE> probs_vec;
 
+  printf(p);
   // === Fast-path when p == 1.0 (or very close) ===
    const float EPS_P = 1e-7f;
    if (p >= 1.0f - EPS_P) {
@@ -1583,7 +1584,7 @@ __global__ void TopPRenormProbKernel(DType* probs, DType* renormed_prob, float* 
        if (base_idx < d) {
          probs_vec.cast_load(probs + row_idx * d + base_idx);
        }
- #pragma unroll
+#pragma unroll
      for (uint32_t j = 0; j < VEC_SIZE; ++j) {
          const uint32_t idx = base_idx + j;
          if (idx < d) thread_sum += static_cast<double>(probs_vec[j]);
@@ -1608,7 +1609,7 @@ __global__ void TopPRenormProbKernel(DType* probs, DType* renormed_prob, float* 
        if (base_idx < d) {
          probs_vec.cast_load(probs + row_idx * d + base_idx);
        }
- #pragma unroll
+#pragma unroll
      for (uint32_t j = 0; j < VEC_SIZE; ++j) {
          const uint32_t idx = base_idx + j;
          float v = probs_vec[j];
