@@ -1566,9 +1566,8 @@ __global__ void TopPRenormProbKernel(DType* probs, DType* renormed_prob, float* 
   // Shared scalar to broadcast row sum for fast path
   __shared__ float s_row_sum;
 
-  // Fast-path: when p >= 1.0 - eps (e.g., p == 1.0), perform simple sum and normalization
-  const float eps = 1e-6f;
-  if (p >= 1.0f - eps) {
+  // Fast-path: when p >= 1.0 (e.g., p == 1.0), perform simple sum and normalization
+  if (p >= 1.0f) {
     // Stage A: per-thread float accumulation over assigned lanes (vectorized)
     float thread_sum = 0.0f;
     const uint32_t num_iters = ceil_div(d, BLOCK_THREADS * VEC_SIZE);
