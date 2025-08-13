@@ -389,7 +389,7 @@ def test_top_k_top_p_joint_sampling_from_logits(batch_size, vocab_size, p):
 
 @pytest.mark.parametrize("batch_size", [1, 99, 989])
 @pytest.mark.parametrize("vocab_size", [111, 32000, 128256])
-@pytest.mark.parametrize("p", [0.1, 0.5, 0.9])
+@pytest.mark.parametrize("p", [0.1, 0.5, 0.9, 1.0])
 def test_top_p_renorm_probs(batch_size, vocab_size, p):
     torch.manual_seed(42)
     pre_norm_prob = torch.rand(batch_size, vocab_size, device="cuda:0")
@@ -405,38 +405,6 @@ def test_top_p_renorm_probs(batch_size, vocab_size, p):
     )
 
     renorm_prob = flashinfer.sampling.top_p_renorm_probs(normalized_prob, p)
-    torch.testing.assert_close(
-        renorm_prob_ground_truth,
-        renorm_prob,
-        rtol=1e-3,
-        atol=1e-3,
-    )
-
-@pytest.mark.parametrize("batch_size", [96])
-@pytest.mark.parametrize("vocab_size", [129280])
-@pytest.mark.parametrize("p", [1.0])
-def test_top_p_renorm_probs_ds(batch_size, vocab_size, p):
-    torch.manual_seed(42)
-    pre_norm_prob = torch.rand(batch_size, vocab_size, device="cuda:0")
-    normalized_prob = pre_norm_prob / pre_norm_prob.sum(dim=-1, keepdim=True)
-    sorted_prob, indices = torch.sort(normalized_prob, descending=False)
-    cdf = torch.cumsum(sorted_prob, dim=-1)
-    mask = torch.zeros(batch_size, vocab_size, dtype=torch.int32, device="cuda:0")
-    mask.scatter_add_(1, indices, (cdf >= (1 - p)).int())
-    renorm_prob_ground_truth = normalized_prob.clone()
-    renorm_prob_ground_truth[mask == 0] = 0
-    renorm_prob_ground_truth = renorm_prob_ground_truth / renorm_prob_ground_truth.sum(
-        dim=-1, keepdim=True
-    )
-
-    trail = 100
-    total_time = 0
-    for _ in range(trail):
-        st = time.perf_counter()
-        renorm_prob = flashinfer.sampling.top_p_renorm_probs(normalized_prob, p)
-        total_time += time.perf_counter() - st
-    print(f"total_time: {total_time}")
-
     torch.testing.assert_close(
         renorm_prob_ground_truth,
         renorm_prob,
